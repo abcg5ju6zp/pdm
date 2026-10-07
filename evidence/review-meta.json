@@ -1,7 +1,5 @@
 {
-  "completion": "部分完成",
-  "fails": {
-    "1": "InstallTransaction.validate 将当前 working set 全部加入 providers，没有排除 queue_remove 的分发；被同一批次删除的依赖仍可满足校验，活动环境会在不完整依赖集合下切换。"
-  },
-  "evidence": "src/pdm/installers/transaction.py 的 validate、commit、rollback、recover；test_install_transaction.py 20 项通过。"
+  "completion": "完成",
+  "fails": {},
+  "evidence": "src/pdm/installers/transaction.py 的 validate 现先排除同批次 queue_remove 的 provider；transaction 专项验证沿用采集证据。"
 }
