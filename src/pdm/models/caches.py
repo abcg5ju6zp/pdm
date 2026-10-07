@@ -30,7 +30,16 @@ VT = TypeVar("VT")
 
 
 class JSONFileCache(Generic[KT, VT]):
-    """A file cache that stores key-value pairs in a json file."""
+    """A file cache that stores key-value pairs in a json file.
+
+    Every update publishes the whole mapping as one complete generation: the
+    data is first written and synced to a temporary file, then atomically
+    moved over the cache file. A failed or aborted write therefore never
+    overwrites the last valid generation. When a cache file is read and an
+    earlier generation was interrupted on disk, the complete entries are
+    salvaged one by one so that a single truncated entry is discarded without
+    affecting any other key, and the cache can keep being filled afterwards.
+    """
 
     def __init__(self, cache_file: Path | str) -> None:
         self.cache_file = Path(cache_file)
@@ -41,15 +50,81 @@ class JSONFileCache(Generic[KT, VT]):
         if not self.cache_file.exists():
             self._cache = {}
             return
-        with self.cache_file.open() as fp:
-            try:
-                self._cache = json.load(fp)
-            except json.JSONDecodeError:
-                return
+        try:
+            content = self.cache_file.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning("Couldn't read cache file %s, start with an empty cache: %s", self.cache_file, e)
+            self._cache = {}
+            return
+        self._cache = self._loads(content)
 
-    def _write_cache(self) -> None:
-        with self.cache_file.open("w") as fp:
-            json.dump(self._cache, fp)
+    @classmethod
+    def _loads(cls, content: str) -> dict[str, VT]:
+        """Parse a cache generation, salvaging entries of a broken one."""
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return cls._salvage_entries(content)
+        if not isinstance(data, dict):
+            logger.warning("Ignore cache data of unexpected JSON type: %r", type(data).__name__)
+            return {}
+        return data
+
+    @staticmethod
+    def _salvage_entries(content: str) -> dict[str, VT]:
+        """Recover every complete entry from a possibly truncated JSON object.
+
+        Entries are serialized sequentially, so an interrupted write can only
+        tear the tail. Walk the ``"key": value`` pairs with a streaming
+        decoder and stop at the first incomplete one; the entries recovered
+        before it stay available.
+        """
+        entries: dict[str, VT] = {}
+        decoder = json.JSONDecoder()
+        try:
+            index = content.index("{") + 1
+        except ValueError:
+            return entries
+        length = len(content)
+        while True:
+            while index < length and content[index] in " \t\r\n":
+                index += 1
+            if index >= length or content[index] == "}":
+                break
+            try:
+                key, index = decoder.raw_decode(content, index)
+                while index < length and content[index] in " \t\r\n":
+                    index += 1
+                if index >= length or content[index] != ":":
+                    break
+                index += 1
+                while index < length and content[index] in " \t\r\n":
+                    index += 1
+                value, index = decoder.raw_decode(content, index)
+            except json.JSONDecodeError:
+                # The current entry or the rest of the file is incomplete,
+                # drop the torn entry and keep everything recovered so far.
+                break
+            if isinstance(key, str):
+                entries[key] = value
+            while index < length and content[index] in " \t\r\n":
+                index += 1
+            if index < length and content[index] == ",":
+                index += 1
+            else:
+                break
+        if entries:
+            logger.warning(
+                "Recovered %d valid entries from an interrupted cache file", len(entries)
+            )
+        return entries
+
+    def _write_cache(self, data: dict[str, VT] | None = None) -> None:
+        # Publish the mapping as one complete generation. If the write fails
+        # or is cancelled, the temporary file is discarded and the previous
+        # generation on disk is left untouched.
+        with atomic_open_for_write(self.cache_file, fsync=True) as fp:
+            json.dump(self._cache if data is None else data, fp)
 
     def __contains__(self, obj: KT) -> bool:
         return self._get_key(obj) in self._cache
@@ -64,8 +139,10 @@ class JSONFileCache(Generic[KT, VT]):
 
     def set(self, obj: KT, value: VT) -> None:
         key = self._get_key(obj)
-        self._cache[key] = value
-        self._write_cache()
+        candidate = dict(self._cache)
+        candidate[key] = value
+        self._write_cache(candidate)
+        self._cache = candidate
 
 
 class CandidateInfoCache(JSONFileCache[Candidate, CandidateInfo]):
@@ -161,14 +238,35 @@ class HashCache:
     def get(self, url: str) -> str | None:
         path = self._get_path_for_key(url)
         with contextlib.suppress(OSError, UnicodeError):
-            return path.read_text("utf-8").strip()
+            value = path.read_text("utf-8").strip()
+            if self._is_valid_hash(value):
+                return value
+            # The entry is missing, empty or torn by an interrupted write;
+            # discard it so the hash is recomputed and republished.
+            logger.debug("Ignoring invalid cached hash at %s", path)
         return None
+
+    @staticmethod
+    def _is_valid_hash(value: str) -> bool:
+        algo, separator, digest = value.partition(":")
+        if not separator or not algo or not digest:
+            return False
+        if any(ch not in "0123456789abcdefABCDEF" for ch in digest):
+            return False
+        # A torn entry may still contain only hex characters, so make sure the
+        # digest has the full length the hash algorithm is supposed to produce.
+        with contextlib.suppress(ValueError):
+            if len(digest) == hashlib.new(algo).digest_size * 2:
+                return True
+        return False
 
     def set(self, url: str, hash: str) -> None:
         path = self._get_path_for_key(url)
         with contextlib.suppress(OSError, UnicodeError):
             path.parent.mkdir(parents=True, exist_ok=True)
-            with atomic_open_for_write(path, encoding="utf-8") as fp:
+            # Publish the entry as one complete generation: it is fully
+            # written and synced before it replaces the previous value.
+            with atomic_open_for_write(path, encoding="utf-8", fsync=True) as fp:
                 fp.write(hash)
 
 

@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "网络解析或构建过程中,1,f2p,缓存更新在中断场景下可恢复"
+  - id: 2
+    type: f2p
+    text: "JSONFileCache 可能被截断,2,f2p,读取不会把截断 JSON 当作有效缓存"
+  - id: 3
+    type: f2p
+    text: "候选信息和哈希缓存的写入与读取按一次完整代际提交,3,f2p,每次缓存更新只发布完整值"
+  - id: 4
+    type: f2p
+    text: "残缺条目自动丢弃而不影响其他键,4,f2p,坏条目被隔离且其他键仍可读取"
+  - id: 5
+    type: f2p
+    text: "失败或取消不覆盖上次有效值，重启后可继续填充,5,f2p,失败保留旧值并可在重启后继续"
+  - id: 6
+    type: f2p
+    text: "禁用缓存、本地目录、不同 Python 环境,6,p2p,这些既有缓存边界保持原语义"
+  - id: 7
+    type: f2p
+    text: "现有 resolver/install 行为保持不变,7,p2p,解析和安装正常流程不回归"
+  - id: 8
+    type: p2p
+    text: "下一次 lock 或 install,8,f2p,后续命令不会因残缺缓存崩溃或错误复用"

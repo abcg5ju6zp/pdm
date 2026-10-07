@@ -1,0 +1,19 @@
+项目标识：pdm-project-pdm-0e6d0e2c-422a-4a7c-abbe-94e35371039c
+Harness：Trae｜有效轮数：48｜syncRevision：48
+Session：586499748533644
+会话时长：1175 秒｜是否超过两小时：否
+完成度结论：部分完成
+收录规则结果：不收录
+复现验证：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。
+轨迹证据：采集阶段保存的当前 Session 轨迹与 count-trae-cn-steps.py 统计一致。
+Prompt-Rubric：Prompt-Rubric 对齐表：P1 候选元数据与哈希缓存完整代际提交 → R1、R3；P2 截断 JSON 自动丢弃坏条目并保留其他键 → R2、R4；P3 失败或取消保留旧值且重启继续填充 → R5；P4 禁用缓存、本地目录、不同 Python、resolver/install 兼容 → R6-R8。无额外验收要求。
+未通过 Rubric：5
+
+Rubric ID：1｜状态：通过｜期望行为：网络解析或构建过程中,1,f2p,缓存更新在中断场景下可恢复｜实际观察：代码路径实现了该行为；src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。
+Rubric ID：2｜状态：通过｜期望行为：JSONFileCache 可能被截断,2,f2p,读取不会把截断 JSON 当作有效缓存｜实际观察：代码路径实现了该行为；src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。
+Rubric ID：3｜状态：通过｜期望行为：候选信息和哈希缓存的写入与读取按一次完整代际提交,3,f2p,每次缓存更新只发布完整值｜实际观察：代码路径实现了该行为；src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。
+Rubric ID：4｜状态：通过｜期望行为：残缺条目自动丢弃而不影响其他键,4,f2p,坏条目被隔离且其他键仍可读取｜实际观察：代码路径实现了该行为；src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。
+Rubric ID：5｜状态：未通过｜期望行为：失败或取消不覆盖上次有效值，重启后可继续填充,5,f2p,失败保留旧值并可在重启后继续｜实际观察：JSONFileCache.set 先修改内存字典再调用 _write_cache；写入失败时磁盘保留旧值，但同一进程后续 get 返回未提交的新值。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。 代码审计定位到该确定行为。｜原因：JSONFileCache.set 先修改内存字典再调用 _write_cache；写入失败时磁盘保留旧值，但同一进程后续 get 返回未提交的新值。｜影响：该条 Rubric 的失败行为会破坏题目要求的状态一致性或失败恢复边界｜证据位置：pdm-project-pdm-0e6d0e2c-422a-4a7c-abbe-94e35371039c 对应项目代码与一次运行验证
+Rubric ID：6｜状态：通过｜期望行为：禁用缓存、本地目录、不同 Python 环境,6,p2p,这些既有缓存边界保持原语义｜实际观察：代码路径实现了该行为；src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。
+Rubric ID：7｜状态：通过｜期望行为：现有 resolver/install 行为保持不变,7,p2p,解析和安装正常流程不回归｜实际观察：代码路径实现了该行为；src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。
+Rubric ID：8｜状态：通过｜期望行为：下一次 lock 或 install,8,f2p,后续命令不会因残缺缓存崩溃或错误复用｜实际观察：代码路径实现了该行为；src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。｜直接证据：src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。

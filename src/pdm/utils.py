@@ -162,7 +162,12 @@ def _published_file_mode(filename: str | Path) -> int:
 
 @contextlib.contextmanager
 def atomic_open_for_write(
-    filename: str | Path, *, mode: str = "w", encoding: str = "utf-8", newline: str | None = None
+    filename: str | Path,
+    *,
+    mode: str = "w",
+    encoding: str = "utf-8",
+    newline: str | None = None,
+    fsync: bool = False,
 ) -> Iterator[IO]:
     dirname = os.path.dirname(filename) or "."
     if not os.path.exists(dirname):
@@ -180,6 +185,11 @@ def atomic_open_for_write(
         fp.close()
         raise
     else:
+        if fsync:
+            # Persist the whole generation before publishing it, so a crash
+            # can never leave a half-written file at the destination.
+            fp.flush()
+            os.fsync(fp.fileno())
         fp.close()
         # The tempfile is created with mode 600, restore the mode the destination
         # should carry before publishing it.
