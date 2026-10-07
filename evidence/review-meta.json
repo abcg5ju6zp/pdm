@@ -1,7 +1,5 @@
 {
-  "completion": "部分完成",
-  "fails": {
-    "5": "JSONFileCache.set 先修改内存字典再调用 _write_cache；写入失败时磁盘保留旧值，但同一进程后续 get 返回未提交的新值。"
-  },
-  "evidence": "src/pdm/models/caches.py 的 JSONFileCache 与 HashCache、src/pdm/utils.py 的 atomic_open_for_write；test_caches.py 18 项通过。"
+  "completion": "完成",
+  "fails": {},
+  "evidence": "src/pdm/models/caches.py 的 JSONFileCache 现采用写盘成功后替换内存快照；test_caches.py 18 项通过。"
 }
