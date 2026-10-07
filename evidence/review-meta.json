@@ -1,0 +1,5 @@
+{
+  "completion": "完成",
+  "fails": {},
+  "evidence": "src/pdm/models/session.py 的 CacheScope、_ScopedSyncCacheProxy 和 _ScopedSyncCacheTransport；test_session.py 11 项通过。"
+}
