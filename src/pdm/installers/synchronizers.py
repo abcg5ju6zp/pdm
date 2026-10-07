@@ -141,6 +141,17 @@ class Synchronizer(BaseSynchronizer):
                     path.rename(target_path)
 
     def synchronize(self) -> None:
+        from contextlib import nullcontext
+
+        from pdm.installers.transaction import InstallTransaction
+
+        tx: InstallTransaction | None = None
+        if self.atomic and not self.dry_run:
+            tx = InstallTransaction(self.environment, self.ui)
+            # Finish/roll back any transaction interrupted by a dead process.
+            tx.recover()
+            # Recovery may have restored files, refresh the working-set snapshot.
+            self.working_set = self.environment.get_working_set()
         to_add, to_update, to_remove = self.compare_with_working_set()
         to_do = {"remove": to_remove, "update": to_update, "add": to_add}
 
@@ -149,95 +160,118 @@ class Synchronizer(BaseSynchronizer):
             return
 
         self._show_headline(to_do)
-        handlers = {
-            "add": self.install_candidate,
-            "update": self.update_candidate,
-            "remove": self.remove_distribution,
-        }
-        sequential_jobs = []
-        parallel_jobs = []
 
-        for kind, packages in to_do.items():
-            for key in packages:
-                if key in self.SEQUENTIAL_PACKAGES or not self.parallel:
-                    sequential_jobs.append((kind, key))
-                elif key in self.candidates and self.candidates[key].req.editable:
-                    # Editable packages are installed sequentially.
-                    sequential_jobs.append((kind, key))
-                else:
-                    parallel_jobs.append((kind, key))
+        if tx is not None and not (to_add or to_update or to_remove or self.install_self):
+            # Nothing to do, don't create a staging transaction.
+            tx = None
+        if tx is not None:
+            self._transaction = tx
+            self._manager = None
+        try:
+            handlers = {
+                "add": self.install_candidate,
+                "update": self.update_candidate,
+                "remove": self.remove_distribution,
+            }
+            sequential_jobs = []
+            parallel_jobs = []
 
-        state = SimpleNamespace(errors=[], parallel_failed=[], sequential_failed=[], jobs=[], mark_failed=False)
-
-        def update_progress(future: Future, kind: str, key: str) -> None:
-            error = future.exception()
-            status.update_spinner(advance=1)  # type: ignore[has-type]
-            if error:
-                exc_info = (type(error), error, error.__traceback__)
-                termui.logger.exception("Error occurs %sing %s: ", kind.rstrip("e"), key, exc_info=exc_info)
-                state.parallel_failed.append((kind, key))
-                state.errors.extend([f"{kind} [success]{key}[/] failed:\n", *traceback.format_exception(*exc_info)])
-                if self.fail_fast:
-                    for job in state.jobs:
-                        job.cancel()
-                    state.mark_failed = True
-
-        # get rich progress and live handler to deal with multiple spinners
-        with InstallationStatus(self.ui, "Synchronizing") as status:
-            for i in range(self.retry_times + 1):
-                status.update_spinner(completed=0, total=len(sequential_jobs) + len(parallel_jobs))
-                for kind, key in sequential_jobs:
-                    try:
-                        handlers[kind](key, status.progress)
-                    except Exception:
-                        termui.logger.exception("Error occurs: ")
-                        state.sequential_failed.append((kind, key))
-                        state.errors.extend([f"{kind} [success]{key}[/] failed:\n", traceback.format_exc()])
-                        if self.fail_fast:
-                            state.mark_failed = True
-                            break
-                    finally:
-                        status.update_spinner(advance=1)
-                if state.mark_failed:
-                    break
-                state.jobs.clear()
-                if parallel_jobs:
-                    with ThreadPoolExecutor() as executor:
-                        for kind, key in parallel_jobs:
-                            future = executor.submit(handlers[kind], key, status.progress)
-                            future.add_done_callback(functools.partial(update_progress, kind=kind, key=key))
-                            state.jobs.append(future)
-                if (
-                    state.mark_failed
-                    or i == self.retry_times
-                    or (not state.sequential_failed and not state.parallel_failed)
-                ):
-                    break
-                sequential_jobs, state.sequential_failed = state.sequential_failed, []
-                parallel_jobs, state.parallel_failed = state.parallel_failed, []
-                state.errors.clear()
-                status.update_spinner(description=f"Retry failed jobs({i + 2}/{self.retry_times + 1})")
-
-            try:
-                if state.errors:
-                    if self.ui.verbosity < termui.Verbosity.DETAIL:
-                        status.console.print("\n[error]ERRORS[/]:")
-                        status.console.print("".join(state.errors), end="")
-                    status.update_spinner(description=f"[error]{termui.Emoji.FAIL}[/] Some package operations failed.")
-                    raise InstallationError("Some package operations failed.")
-
-                if self.install_self:
-                    self_key = self.self_key
-                    assert self_key
-                    self.candidates[self_key] = self.self_candidate
-                    word = "a" if self.no_editable else "an editable"
-                    status.update_spinner(description=f"Installing the project as {word} package...")
-                    if self_key in self.working_set:
-                        self.update_candidate(self_key, status.progress)
+            for kind, packages in to_do.items():
+                for key in packages:
+                    if key in self.SEQUENTIAL_PACKAGES or not self.parallel:
+                        sequential_jobs.append((kind, key))
+                    elif key in self.candidates and self.candidates[key].req.editable:
+                        # Editable packages are installed sequentially.
+                        sequential_jobs.append((kind, key))
                     else:
-                        self.install_candidate(self_key, status.progress)
+                        parallel_jobs.append((kind, key))
 
-                status.update_spinner(description=f"{termui.Emoji.POPPER} All complete!")
-            finally:
-                # Now we remove the .pdmtmp suffix from the installed packages
-                self._fix_pth_files()
+            state = SimpleNamespace(errors=[], parallel_failed=[], sequential_failed=[], jobs=[], mark_failed=False)
+
+            def update_progress(future: Future, kind: str, key: str) -> None:
+                error = future.exception()
+                status.update_spinner(advance=1)  # type: ignore[has-type]
+                if error:
+                    exc_info = (type(error), error, error.__traceback__)
+                    termui.logger.exception("Error occurs %sing %s: ", kind.rstrip("e"), key, exc_info=exc_info)
+                    state.parallel_failed.append((kind, key))
+                    state.errors.extend([f"{kind} [success]{key}[/] failed:\n", *traceback.format_exception(*exc_info)])
+                    if self.fail_fast:
+                        for job in state.jobs:
+                            job.cancel()
+                        state.mark_failed = True
+
+            # get rich progress and live handler to deal with multiple spinners
+            with (
+                InstallationStatus(self.ui, "Synchronizing") as status,
+                tx.activate() if tx is not None else nullcontext(),
+            ):
+                    for i in range(self.retry_times + 1):
+                        status.update_spinner(completed=0, total=len(sequential_jobs) + len(parallel_jobs))
+                        for kind, key in sequential_jobs:
+                            try:
+                                handlers[kind](key, status.progress)
+                            except Exception:
+                                termui.logger.exception("Error occurs: ")
+                                state.sequential_failed.append((kind, key))
+                                state.errors.extend([f"{kind} [success]{key}[/] failed:\n", traceback.format_exc()])
+                                if self.fail_fast:
+                                    state.mark_failed = True
+                                    break
+                            finally:
+                                status.update_spinner(advance=1)
+                        if state.mark_failed:
+                            break
+                        state.jobs.clear()
+                        if parallel_jobs:
+                            with ThreadPoolExecutor() as executor:
+                                for kind, key in parallel_jobs:
+                                    future = executor.submit(handlers[kind], key, status.progress)
+                                    future.add_done_callback(functools.partial(update_progress, kind=kind, key=key))
+                                    state.jobs.append(future)
+                        if (
+                            state.mark_failed
+                            or i == self.retry_times
+                            or (not state.sequential_failed and not state.parallel_failed)
+                        ):
+                            break
+                        sequential_jobs, state.sequential_failed = state.sequential_failed, []
+                        parallel_jobs, state.parallel_failed = state.parallel_failed, []
+                        state.errors.clear()
+                        status.update_spinner(description=f"Retry failed jobs({i + 2}/{self.retry_times + 1})")
+
+                    try:
+                        if state.errors:
+                            if self.ui.verbosity < termui.Verbosity.DETAIL:
+                                status.console.print("\n[error]ERRORS[/]:")
+                                status.console.print("".join(state.errors), end="")
+                            status.update_spinner(description=f"[error]{termui.Emoji.FAIL}[/] Some package operations failed.")
+                            raise InstallationError("Some package operations failed.")
+
+                        if self.install_self:
+                            self_key = self.self_key
+                            assert self_key
+                            self.candidates[self_key] = self.self_candidate
+                            word = "a" if self.no_editable else "an editable"
+                            status.update_spinner(description=f"Installing the project as {word} package...")
+                            if self_key in self.working_set:
+                                self.update_candidate(self_key, status.progress)
+                            else:
+                                self.install_candidate(self_key, status.progress)
+
+                        if tx is not None:
+                            # All steps staged successfully: validate the batch,
+                            # promote validated cache entries and atomically
+                            # switch the active environment.
+                            tx.commit()
+                        else:
+                            # Now we remove the .pdmtmp suffix from the installed packages
+                            self._fix_pth_files()
+
+                        status.update_spinner(description=f"{termui.Emoji.POPPER} All complete!")
+                    finally:
+                        if tx is None:
+                            self._fix_pth_files()
+        finally:
+            self._transaction = None
+            self._manager = None

@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import os
+import shutil
 import stat
 from collections.abc import Iterable
 from functools import cache
@@ -272,32 +273,143 @@ def get_wheel_cache(directory: Path | str) -> WheelCache:
 
 
 class PackageCache:
+    """Central on-disk store of unpacked wheels.
+
+    Every wheel is first extracted into a *candidate* directory whose name is
+    ``.<final>.candidate``. A candidate is fully validated (RECORD hashes)
+    before being atomically promoted (``os.replace``, same directory) to the
+    confirmed ``<wheel>.cache`` directory. Confirmed, complete entries are
+    never overwritten, so a failed batch can never poison the reusable cache.
+    """
+
+    candidate_suffix = ".candidate"
+
     def __init__(self, root: Path) -> None:
         self.root = root
 
-    def cache_wheel(self, wheel: Path) -> CachedPackage:
-        """Create a CachedPackage instance from a wheel file"""
+    def _confirmed_path(self, wheel: Path) -> Path:
+        return self.root.joinpath(f"{wheel.name}.cache")
+
+    @staticmethod
+    def _wheel_checksum(wheel: Path) -> str:
+        digest = hashlib.sha256()
+        with wheel.open("rb") as fp:
+            for chunk in iter(lambda: fp.read(65536), b""):
+                digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+
+    def _extract_candidate(self, wheel: Path, dest: Path) -> CachedPackage:
+        """Extract *wheel* into a fresh candidate directory and validate it."""
+        import uuid
         import zipfile
 
-        dest = self.root.joinpath(f"{wheel.name}.cache")
-        pkg = CachedPackage(dest, original_wheel=wheel)
-        if dest.exists():
-            return pkg
-        dest.mkdir(parents=True, exist_ok=True)
-        with pkg.lock():
-            logger.info("Unpacking wheel into cached location %s", dest)
-            with zipfile.ZipFile(wheel) as zf:
-                try:
+        import filelock
+
+        token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        candidate_dir = dest.with_name(f".{dest.name}.{token}{self.candidate_suffix}")
+        package = CachedPackage(candidate_dir, original_wheel=wheel, target_path=dest)
+        lock_file = candidate_dir.with_suffix(".lock")
+        try:
+            with filelock.FileLock(lock_file):
+                logger.info("Unpacking wheel into candidate location %s", candidate_dir)
+                with zipfile.ZipFile(wheel) as zf:
                     for item in zf.infolist():
-                        target_path = zf.extract(item, dest)
+                        target_path = zf.extract(item, candidate_dir)
                         mode = item.external_attr >> 16
                         is_executable = bool(mode and stat.S_ISREG(mode) and mode & 0o111)
                         if is_executable:
                             make_file_executable(target_path)
-                except Exception:  # pragma: no cover
-                    pkg.cleanup()  # cleanup on any error
-                    raise
-        return pkg
+                # Strict gate: a truncated extraction must never be promoted.
+                package.verify_record_hashes()
+                with atomic_open_for_write(candidate_dir / ".checksum") as fp:
+                    fp.write(self._wheel_checksum(wheel))
+        except BaseException:
+            package.cleanup()
+            with contextlib.suppress(OSError):
+                lock_file.unlink()
+            raise
+        return package
+
+    def cache_wheel(self, wheel: Path) -> CachedPackage:
+        """Return a complete, confirmed :class:`CachedPackage` for *wheel*.
+
+        Incomplete entries left by a killed process or a full disk are
+        discarded and re-extracted through the candidate stage.
+        """
+        dest = self._confirmed_path(wheel)
+        if dest.exists():
+            package = CachedPackage(dest, original_wheel=wheel)
+            if package.is_complete():
+                return package
+            logger.warning("Discarding incomplete cached package %s", dest)
+            shutil.rmtree(dest, ignore_errors=True)
+        candidate = self._extract_candidate(wheel, dest)
+        return self.promote_candidate(candidate)
+
+    def acquire_candidate(self, wheel: Path) -> CachedPackage:
+        """Return a cached package for a staging transaction.
+
+        Returns the confirmed entry directly when it is complete, otherwise a
+        fresh validated candidate that the transaction promotes only after
+        the whole batch succeeds.
+        """
+        dest = self._confirmed_path(wheel)
+        if dest.exists():
+            package = CachedPackage(dest, original_wheel=wheel)
+            if package.is_complete():
+                return package
+        return self._extract_candidate(wheel, dest)
+
+    def promote_candidate(self, package: CachedPackage) -> CachedPackage:
+        """Atomically publish a validated candidate into the cache.
+
+        A complete confirmed directory is never replaced; in that case the
+        candidate is discarded and the confirmed package is returned.
+        """
+        import filelock
+
+        dest = package.final_path
+        if package.path == dest:
+            return package
+        lock_file = dest.with_name(f".{dest.name}.promote.lock")
+        with filelock.FileLock(lock_file):
+            if dest.exists():
+                confirmed = CachedPackage(dest, original_wheel=package.original_wheel)
+                if confirmed.is_complete():
+                    logger.info("Discard candidate %s, confirmed cache %s is complete", package.path, dest)
+                    package.cleanup()
+                    return confirmed
+                logger.warning("Discarding incomplete cached package %s", dest)
+                shutil.rmtree(dest, ignore_errors=True)
+            logger.info("Promoting cached package %s -> %s", package.path, dest)
+            os.replace(package.path, dest)
+        with contextlib.suppress(OSError):
+            package.path.with_suffix(".lock").unlink()
+        return CachedPackage(dest, original_wheel=package.original_wheel)
+
+    def sweep_candidates(self) -> int:
+        """Remove candidate directories abandoned by dead transactions.
+
+        A directory whose lock is held by a live process is left alone.
+        """
+        import filelock
+
+        count = 0
+        for candidate_dir in self.root.glob(f".*{self.candidate_suffix}"):
+            lock_file = candidate_dir.with_suffix(".lock")
+            lock = filelock.FileLock(lock_file)
+            try:
+                lock.acquire(timeout=0)
+            except filelock.Timeout:
+                continue
+            try:
+                shutil.rmtree(candidate_dir, ignore_errors=True)
+            finally:
+                lock.release()
+                with contextlib.suppress(OSError):
+                    lock_file.unlink()
+            count += 1
+        return count
 
     def iter_packages(self) -> Iterable[CachedPackage]:
         for path in self.root.rglob("*.whl.cache"):

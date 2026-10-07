@@ -132,6 +132,8 @@ class BaseRemovePaths(abc.ABC):
         self._paths: set[NormalizedPath] = set()
         self._pth_entries: set[str] = set()
         self.refer_to: str | None = None
+        # Optional directory keeping stashed files across a transaction.
+        self._stash_root: str | None = None
 
     def difference_update(self, other: BaseRemovePaths) -> None:
         self._pth_entries.difference_update(other._pth_entries)
@@ -154,10 +156,16 @@ class BaseRemovePaths(abc.ABC):
         """Roll back the removal operations"""
 
     @classmethod
-    def from_dist(cls, dist: Distribution, environment: BaseEnvironment) -> Self:
+    def from_dist(
+        cls,
+        dist: Distribution,
+        environment: BaseEnvironment,
+        stash_root: str | None = None,
+    ) -> Self:
         """Create an instance from the distribution"""
         scheme = environment.get_paths()
         instance = cls(dist, environment)
+        instance._stash_root = stash_root
         meta_location = os.path.normcase(dist._path.absolute())  # type: ignore[attr-defined]
         dist_location = os.path.dirname(meta_location)
         if is_egg_link(dist):  # pragma: no cover
@@ -230,12 +238,21 @@ class StashedRemovePaths(BaseRemovePaths):
 
     PTH_REGISTRY = "easy-install.pth"
 
-    def __init__(self, dist: Distribution, environment: BaseEnvironment) -> None:
+    def __init__(
+        self,
+        dist: Distribution,
+        environment: BaseEnvironment,
+        stash_root: str | None = None,
+    ) -> None:
         super().__init__(dist, environment)
         self._pth_file = os.path.join(self.environment.get_paths()["purelib"], self.PTH_REGISTRY)
         self._saved_pth: bytes | None = None
         self._stashed: list[tuple[str, str]] = []
         self._tempdirs: dict[str, TemporaryDirectory] = {}
+        # When set, stashed files are kept below this directory so an
+        # enclosing transaction can journal and restore them even after the
+        # managing process is gone.
+        self._stash_root = stash_root
 
     def remove(self) -> None:
         self._remove_pth()
@@ -272,7 +289,7 @@ class StashedRemovePaths(BaseRemovePaths):
                 termui.logger.debug("File path %s is not under packages root %s, skip", old_path, prefix)
                 continue
             if root not in self._tempdirs:
-                self._tempdirs[root] = TemporaryDirectory("-uninstall", "pdm-")
+                self._tempdirs[root] = TemporaryDirectory("-uninstall", "pdm-", dir=self._stash_root)
             new_root = self._tempdirs[root].name
             relpath = os.path.relpath(old_path, root)
             new_path = os.path.join(new_root, relpath)

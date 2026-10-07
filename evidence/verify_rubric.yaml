@@ -1,0 +1,25 @@
+rubrics:
+  - id: 1
+    type: f2p
+    text: "安装在临时环境完成依赖、脚本和 metadata 校验前不改变活动环境。"
+  - id: 2
+    type: f2p
+    text: "候选缓存只有在完整安装成功后才变为可复用。"
+  - id: 3
+    type: f2p
+    text: "解压、脚本、磁盘或 metadata 失败会恢复上一份可用环境。"
+  - id: 4
+    type: f2p
+    text: "进程中止后重启能继续未确认安装或清理候选，不留下半环境。"
+  - id: 5
+    type: f2p
+    text: "失败批次不会覆盖已确认缓存，修复后重试不会跳过缺失包。"
+  - id: 6
+    type: f2p
+    text: "editable、本地路径、PEP 582、镜像源和只读检查保持兼容。"
+  - id: 7
+    type: p2p
+    text: "成功安装只产生一次环境代际切换，查询结果不混合两代。"
+  - id: 8
+    type: p2p
+    text: "普通 install、sync 和 export 流程不回归。"

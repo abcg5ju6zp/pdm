@@ -6,6 +6,7 @@ from collections.abc import Collection, Iterable
 from functools import cached_property
 from importlib.metadata import Distribution
 from itertools import chain
+from typing import TYPE_CHECKING
 
 from pdm import termui
 from pdm.environments import BaseEnvironment
@@ -15,6 +16,9 @@ from pdm.models.candidates import Candidate
 from pdm.models.repositories import Package
 from pdm.models.requirements import FileRequirement, Requirement, parse_requirement, strip_extras
 from pdm.utils import is_editable, normalize_name
+
+if TYPE_CHECKING:
+    from pdm.installers.transaction import InstallTransaction
 
 
 def editables_candidate(environment: BaseEnvironment) -> Candidate | None:
@@ -39,6 +43,8 @@ class BaseSynchronizer:
     :param reinstall: whether to reinstall all packages
     :param only_keep: If true, only keep the selected candidates
     :param fail_fast: If true, stop the installation on first error
+    :param atomic: stage, validate and commit all operations in one transaction,
+        leaving the previous environment intact on failure
     """
 
     SEQUENTIAL_PACKAGES = ("pip", "setuptools", "wheel")
@@ -58,6 +64,7 @@ class BaseSynchronizer:
         use_install_cache: bool | None = None,
         packages: Iterable[Package] = (),
         requirements: Iterable[Requirement] | None = None,
+        atomic: bool | None = None,
     ) -> None:
         if candidates:  # pragma: no cover
             self.requested_candidates = candidates
@@ -76,6 +83,10 @@ class BaseSynchronizer:
         self.only_keep = only_keep
         self.parallel = environment.project.config["install.parallel"]
         self.fail_fast = fail_fast
+        if atomic is None:
+            atomic = bool(environment.project.config["install.atomic"])
+        self.atomic = atomic
+        self._transaction: InstallTransaction | None = None
 
         self.working_set = environment.get_working_set()
         self.ui = environment.project.core.ui
@@ -137,7 +148,10 @@ class BaseSynchronizer:
 
     def get_manager(self, rename_pth: bool = False) -> InstallManager:
         return self.environment.project.core.install_manager_class(
-            self.environment, use_install_cache=self.use_install_cache, rename_pth=rename_pth
+            self.environment,
+            use_install_cache=self.use_install_cache,
+            rename_pth=rename_pth,
+            transaction=self._transaction,
         )
 
     @property

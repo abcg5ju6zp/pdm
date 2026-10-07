@@ -261,6 +261,12 @@ You can switch between them by running `pdm config [--local] install.cache_metho
 !!! note
     Only packages installed from one of the package sources can be cached.
 
+## Atomic installation
+
+`install.atomic` is enabled by default. When it is on, `pdm sync` and `pdm install` stage every package of a batch -- files, generated console scripts and distribution metadata -- into a temporary staging area and validate the whole batch before touching the active environment. Only after all packages have been staged and verified are they moved into place with atomic renames.
+
+If the installation fails, is cancelled (for example because the disk is full or the process is terminated), the previous environment is restored and the staging data is discarded. A package is written into the central cache (see above) only after it passes validation, and a complete cache entry is never overwritten, so a failed installation can never poison the cache or be mistaken for an installed package on the next run. Interrupted operations are recovered automatically when PDM starts the next installation. Set `install.atomic` to `false` (or `PDM_INSTALL_ATOMIC=0`) to restore the legacy non-transactional behavior.
+
 ## Configure the repositories for upload
 
 When using the [`pdm publish`](../reference/cli.md#publish) command, it reads the repository secrets from the **global** config file(`<CONFIG_ROOT>/config.toml`). The content of the config is as follows:

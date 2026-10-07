@@ -97,11 +97,16 @@ class InstallDestination(SchemeDictionaryDestination):
         *args: Any,
         link_method: LinkMethod = "copy",
         rename_pth: bool = False,
+        record_sink: list[tuple[str, str, str]] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.link_method = link_method
         self.rename_pth = rename_pth
+        # When provided, every written file is appended as
+        # ``(scheme, relative_path, absolute_target_path)`` so a staging
+        # transaction can validate the batch and publish it atomically later.
+        self.record_sink = record_sink
 
     def _compile_bytecode(self, scheme: Scheme, record: RecordEntry) -> None:
         if self.link_method == "symlink":
@@ -165,6 +170,8 @@ class InstallDestination(SchemeDictionaryDestination):
 
         if is_executable:
             make_file_executable(target_path)
+        if self.record_sink is not None:
+            self.record_sink.append((scheme, path, os.path.normcase(os.path.abspath(target_path))))
         return RecordEntry(path, Hash(self.hash_algorithm, hash_), size)
 
 
@@ -186,9 +193,17 @@ def install_wheel(
     install_links: bool = False,
     rename_pth: bool = False,
     requested: bool = False,
+    cached_package: CachedPackage | None = None,
+    record_sink: list[tuple[str, str, str]] | None = None,
+    defer_referrer: bool = False,
 ) -> str:
     """Only create .pth files referring to the cached package.
     If the cache doesn't exist, create one.
+
+    When ``cached_package`` is provided it is used directly (it may be a
+    staging *candidate* not yet promoted) instead of touching the confirmed
+    package cache. ``defer_referrer`` skips the referrer bookkeeping so the
+    confirmed cache is not mutated until the whole batch is committed.
     """
     interpreter = str(environment.interpreter.executable)
     script_kind = environment.script_kind
@@ -213,15 +228,20 @@ def install_wheel(
         script_kind=script_kind,
         link_method=link_method,
         rename_pth=rename_pth,
+        record_sink=record_sink,
     )
     if install_links:
-        package = environment.project.package_cache.cache_wheel(wheel)
+        if cached_package is None:
+            package = environment.project.package_cache.cache_wheel(wheel)
+        else:
+            package = cached_package
         source = PackageWheelSource(package)
         if link_method == "symlink":
-            # Track usage when symlink is used
-            additional_metadata["REFER_TO"] = package.path.as_posix().encode()
+            # Track usage when symlink is used. ``final_path`` is the confirmed
+            # location even when reading files from a staging candidate.
+            additional_metadata["REFER_TO"] = package.final_path.as_posix().encode()
         dist_info_dir = install(source, destination=destination, additional_metadata=additional_metadata)
-        if link_method == "symlink":
+        if link_method == "symlink" and not defer_referrer:
             package.add_referrer(dist_info_dir)
     else:
         with WheelFile.open(wheel) as source:

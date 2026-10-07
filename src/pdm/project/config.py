@@ -199,6 +199,13 @@ class Config(MutableMapping[str, str]):
             "Specify how to create links to the caches(`symlink/hardlink`)",
             "symlink",
         ),
+        "install.atomic": ConfigItem(
+            "Stage, validate and commit installations atomically, "
+            "restoring the previous environment on failure or interruption",
+            True,
+            env_var="PDM_INSTALL_ATOMIC",
+            coerce=ensure_boolean,
+        ),
         "python.providers": ConfigItem(
             "List of python provider names for findpython", default=[], coerce=split_by_comma
         ),
